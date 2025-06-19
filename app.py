@@ -8,12 +8,17 @@ cost of living across different countries. It includes:
 - Global map visualization
 - Inflation trends
 - Detailed data tables
+- Radar chart comparing cost of living indicators
 
 Required data files:
-- Housing-related-expenditure-of-households.csv (Note: docstring mentions "Housing expenditure.csv")
+- Housing-related-expenditure-of-households.csv
 - Cost_of_living.csv
 - Monthly_salary.csv
-- CPI_2.csv (Note: docstring mentions "Yearly_CPI.csv")
+- CPI_2.csv
+- VAT.csv
+- Crude_oil.csv (Brent Crude)
+- Oil_prices.csv (Multiple Benchmarks)
+- Currency.csv (Exchange rates)
 """
 
 from shiny import App, Inputs, Outputs, Session, reactive, render, ui
@@ -28,18 +33,17 @@ from typing import Dict, Optional, List
 from datetime import datetime
 import numpy as np
 import matplotlib
-matplotlib.use('agg') # Important for Matplotlib in non-GUI environments like Shiny server
-# import cartopy.crs as ccrs # Cartopy not used in Plotly map
-# import cartopy.feature as cfeature # Cartopy not used
-# import json # Not actively used
-# import requests # Duplicate import
+matplotlib.use('agg') 
 import os
 import traceback
 from io import StringIO
-# import csv # Not actively used directly
+from plotly.subplots import make_subplots
+from sklearn.preprocessing import MinMaxScaler
+from pycountry import countries
+#from fastapi.staticfiles import StaticFiles
 
 # --- Configuration ---
-DATA_FOLDER = "C:/Users/Lenovo/Desktop/cost of living" # TODO: Make this relative or configurable
+DATA_FOLDER = "cost of living" 
 CURRENT_YEAR = datetime.now().year
 YEARS = list(range(2015, CURRENT_YEAR + 1))
 
@@ -167,6 +171,43 @@ def load_categories_data(data_dir: str) -> Optional[pd.DataFrame]:
         traceback.print_exc()
         return None
 
+def normalize_country_name(country):
+    """Normalize country names, handling various data types."""
+    if pd.isna(country) or country is None:  # Handle missing values directly
+        return "N/A"
+    if isinstance(country, (int, float)):
+        country = str(int(country))
+    elif not isinstance(country, str):
+        country = str(country)
+
+    country = country.strip()
+    country_variations = {
+            'USA': 'United States', 'United States of America': 'United States',
+            'UK': 'United Kingdom', 'Great Britain': 'United Kingdom', 'Britain': 'United Kingdom',
+            'Czechia': 'Czech Republic', 'České': 'Czech Republic', 'Česká': 'Czech Republic',
+            'República Checa': 'Czech Republic', 'République tchèque': 'Czech Republic',
+            'Republic of Moldova': 'Moldova',
+            'Turkiye': 'Turkey', 'Türkiye': 'Turkey', 'T\x81rkiye': 'Turkey', # Handle encoding issue if present
+            'Korea, Rep.': 'South Korea', 'Korea': 'South Korea', 'Republic of Korea': 'South Korea',
+            'Russian Federation': 'Russia',
+            'Slovak Republic': 'Slovakia',
+            'Bosnia and Herzegovina': 'Bosnia-Herzegovina',
+            'United Arab Emirates': 'UAE', 'UAE (United Arab Emirates)': 'UAE', # Using UAE as standard here, map COUNTRY_DATA if needed
+            'Hong Kong SAR, China': 'Hong Kong',
+            'Taiwan, China': 'Taiwan',
+            'Macedonia, FYR': 'North Macedonia', 'Macedonia': 'North Macedonia',
+            'The Netherlands': 'Netherlands',
+            'Egypt, Arab Rep.': 'Egypt'
+        # Add more variations as identified from data
+    }
+    # Case-insensitive direct match first
+    normalized = country_variations.get(country, country)
+    for k, v in country_variations.items():
+        if k.lower() == country.lower():
+            normalized = v
+            break
+    return normalized.strip()
+
 def load_cpi_data(cpi_2_path: str) -> pd.DataFrame:
     """Loads CPI data from CPI_2.csv, handling missing values."""
     try:
@@ -179,6 +220,7 @@ def load_cpi_data(cpi_2_path: str) -> pd.DataFrame:
                 df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
         
         df = df.ffill(axis=1) # Forward fill missing CPI values
+        
 
         print("Successfully loaded and processed data from CPI_2.csv")
         print(f"Loaded CPI for {len(df)} countries. Sample:")
@@ -193,12 +235,24 @@ def load_cpi_data(cpi_2_path: str) -> pd.DataFrame:
         traceback.print_exc()
         return pd.DataFrame()
 
+import re
+
 def load_data() -> Optional[Dict[str, pd.DataFrame]]:
+    def convert_to_usd(amount, currency, exchange_rates, year):
+        if currency == 'USD':
+            return amount
+        rate = exchange_rates.get(currency, {}).get(str(year), None)
+        if rate is None:
+            print(f"Warning: No exchange rate found for {currency} in {year}. Using 1.0.")
+            rate = 1.0
+        return amount * rate
+
     try:
-        global DATA # Not strictly needed if DATA is assigned the return of this function
+        global DATA
         if not os.path.exists(DATA_FOLDER):
             raise FileNotFoundError(f"Data folder not found: {DATA_FOLDER}")
-            
+        
+      
         # Load Monthly salary data
         print("Loading Monthly salary data...")
         monthly_salary_path = os.path.join(DATA_FOLDER, "Monthly_salary.csv")
@@ -219,8 +273,7 @@ def load_data() -> Optional[Dict[str, pd.DataFrame]]:
         print(f"Salary data loaded. Shape: {monthly_salary_df.shape}. Countries: {monthly_salary_df['Country'].nunique()}")
 
         # Load categories data (Housing-related expenditure)
-        print("\nLoading Categories data (Housing-related expenditure)...")
-        # categories_df_raw = load_categories_data(DATA_FOLDER) # Using specific loader
+        print("\nLoading Categories data...")
         categories_df_raw = pd.read_csv(
            os.path.join(DATA_FOLDER, "Housing-related-expenditure-of-households.csv"),
            encoding='latin1', sep=';', decimal=','
@@ -275,7 +328,7 @@ def load_data() -> Optional[Dict[str, pd.DataFrame]]:
         print(f"Cost of living data loaded. Shape: {cost_living_df.shape}. Countries: {cost_living_df['Country'].nunique()}")
 
         # Load CPI data
-        print("\nLoading CPI data (CPI_2.csv)...")
+        print("\nLoading CPI data...")
         cpi_2_path = os.path.join(DATA_FOLDER, "CPI_2.csv")
         cpi_df = load_cpi_data(cpi_2_path)
         if cpi_df.empty:
@@ -287,12 +340,187 @@ def load_data() -> Optional[Dict[str, pd.DataFrame]]:
             # print(f"CPI columns: {cpi_df.columns.tolist()}") # Potentially very long list
             # print(f"Sample of CPI data:\n{cpi_df.head()}")
 
+         # Load VAT data
+        print("\nLoading VAT data...")
+        vat_data = None
+        try:
+            vat_path = os.path.join(DATA_FOLDER, "VAT.csv")
+
+        # Pre-process the file content to fix the header row MORE ROBUSTLY
+            with open(vat_path, 'r', encoding='utf-8-sig') as f:
+                header = f.readline()  # Read the header row separately
+                content = f.read()  # Read the rest of the content
+
+            cleaned_header = header.replace('"', '').strip().split(',')
+            cleaned_content = content.replace('"', '')
+
+            vat_df = pd.read_csv(StringIO(cleaned_content), header=None, names=cleaned_header, on_bad_lines='skip')
+
+        # Print the actual columns to debug (after cleaning)
+            print("Original VAT columns (after cleaning):", vat_df.columns.tolist())
+
+        # Find the country column (case-insensitive)
+            country_col = None
+            possible_country_cols = ['Country', 'Country Name', 'CountryName', 'Nation']
+            for col in possible_country_cols:
+                if col.lower() in (c.lower() for c in vat_df.columns):  # Case-insensitive check
+                    country_col = next((c for c in vat_df.columns if c.lower() == col.lower()), None)  # Get actual case
+                    break
+
+            if not country_col:
+                raise ValueError(f"No country column found. Available columns: {vat_df.columns.tolist()}")
+
+            vat_df.rename(columns={country_col: 'Country'}, inplace=True)
+
+        # Find year columns (2015-2024)
+            year_columns = [str(year) for year in range(2015, 2025)]  # Updated range
+            columns_to_keep = ['Country'] + year_columns
+            vat_df = vat_df[columns_to_keep]
+            
+            # Convert year columns to numeric
+            for col in year_columns:
+                if col in vat_df.columns:
+                    vat_df[col] = pd.to_numeric(
+                        vat_df[col].astype(str)
+                        .str.replace(',', '.')
+                        .str.replace('"', ''),
+                        errors='coerce'
+                    )
+            
+            # Create long format dataframe
+            vat_df_long = pd.melt(
+                vat_df,
+                id_vars=['Country'],
+                value_vars=year_columns,
+                var_name='Year',
+                value_name='VAT_Rate'
+            )
+            
+            # Convert Year to numeric and sort
+            vat_df_long['Year'] = pd.to_numeric(vat_df_long['Year'])
+            vat_df_long = vat_df_long.sort_values(['Country', 'Year'])
+            
+            # Remove rows with NaN values
+            vat_df_long = vat_df_long.dropna(subset=['VAT_Rate'])
+            
+            # Create VAT rate getter function
+            def get_vat_rate(country: str, year: int) -> Optional[float]:
+                try:
+                    matching_rows = vat_df_long[
+                        (vat_df_long['Country'] == country) & 
+                        (vat_df_long['Year'] == year)
+                    ]
+                    if matching_rows.empty:
+                        return None
+                    rate = matching_rows['VAT_Rate'].iloc[0]
+                    return float(rate) if pd.notna(rate) else None
+                except (IndexError, ValueError) as e:
+                    print(f"Error getting VAT rate for {country} in {year}: {e}")
+                    return None
+            
+            # Store VAT data
+            vat_data = {
+                'original': vat_df,
+                'processed': vat_df_long,
+                'get_rate': get_vat_rate
+            }
+            
+            print("Successfully loaded and processed VAT data")
+            print(f"Processed VAT data shape: {vat_df_long.shape}")
+            print("Sample of processed VAT data:")
+            print(vat_df_long.head())
+            
+        except Exception as e:
+            print(f"Error loading VAT data: {str(e)}")
+            traceback.print_exc()
+            vat_data = None
+        
+
+        # Load Crude Oil Prices (Brent) - you can expand this for other benchmarks
+        print("\nLoading Crude Oil data...")
+        crude_oil_df = pd.read_csv(
+            os.path.join(DATA_FOLDER, "Crude_oil.csv"),
+            sep=",", encoding='utf-8',
+            parse_dates=['observation_date'])
+        crude_oil_df = crude_oil_df.rename(columns={'observation_date': 'Date', 'DCOILBRENTEU': 'Brent_Price'})
+
+        # Load Currency Exchange Rates (Corrected)
+        currency_path = os.path.join(DATA_FOLDER, "Currency.csv")
+
+        # Use csv module for header parsing with newline=''
+        print("\nLoading Currency data...")
+        currency_path = os.path.join(DATA_FOLDER, "Currency.csv")
+        currency_df = pd.read_csv(
+            currency_path,
+            encoding='utf-8-sig',
+            quotechar='"',
+            dtype=str,
+            on_bad_lines='skip'
+        )
+
+        # Split the data if it's in one column
+        if len(currency_df.columns) == 1:
+            first_col = currency_df.columns[0]
+            new_columns = first_col.split(',')
+            new_columns = [col.strip('"') for col in new_columns]
+            
+            new_data = []
+            for _, row in currency_df.iterrows():
+                values = row[first_col].split(',')
+                values = [v.strip('"') for v in values]
+                if len(values) < len(new_columns):
+                    values.extend([''] * (len(new_columns) - len(values)))
+                new_data.append(values[:len(new_columns)])
+            
+            currency_df = pd.DataFrame(new_data, columns=new_columns)
+
+        # Clean up column names and data
+        currency_df.columns = currency_df.columns.str.strip().str.strip('"')
+        
+        # Convert year columns to numeric
+        year_cols = [col for col in currency_df.columns if str(col).isdigit()]
+        year_cols = [str(year) for year in range(2015, 2025)]  # Columns to keep
+        cols_to_keep = ['Country Name', 'Country Code', 'Indicator Name', 'Indicator Code'] + year_cols
+        currency_df = currency_df[cols_to_keep]
+        for col in year_cols:
+            currency_df[col] = pd.to_numeric(currency_df[col], errors='coerce')
+
+        # Create a copy of the DataFrame with renamed column
+        result_df = currency_df.copy()
+        result_df = result_df.rename(columns={'Country Name': 'Country'})
+
+        # Keep only necessary columns
+        cols_to_keep = ['Country'] + year_cols
+        result_df = result_df[cols_to_keep]
+
+        # Remove any rows where all year values are NaN
+        result_df = result_df.dropna(subset=year_cols, how='all')
+
+        print("\nFinal DataFrame info:")
+        print("Shape:", result_df.shape)
+        print("Columns:", result_df.columns.tolist())
+        print("\nSample of final data (first 5 rows, first 5 year columns):")
+        sample_cols = ['Country'] + sorted(year_cols)[:5]
+        print(result_df[sample_cols].head())
+        
+        print("\nNumber of countries:", len(result_df))
+        print("Year range:", min(year_cols), "to", max(year_cols))
+
+        # Pivot to get exchange rates by country and year
+        exchange_rates_df = result_df.set_index('Country')
+
+        print("Loaded and processed Currency data:", exchange_rates_df.shape)
+
+
         return {
             "expenses": categories_df, # This seems to be the same as "categories"
             "cost_living": cost_living_df,
             "salary": monthly_salary_df,
             "cpi": cpi_df,
-            "categories": categories_df # Main categories dataframe
+            "categories": categories_df, # Main categories dataframe
+            "vat_rates": vat_data,
+            "crude_oil": crude_oil_df,
+            "currency": exchange_rates_df
         }
 
     except Exception as e:
@@ -313,34 +541,14 @@ if DATA is None:
 #     else:
 #         print(f"\n{key}: Data is not a DataFrame (type: {type(df_item)})")
     
-def normalize_country_name(country: str) -> str:
-    """Normalize country names for consistency between different datasets."""
-    country_variations = {
-        'USA': 'United States', 'United States of America': 'United States',
-        'UK': 'United Kingdom', 'Great Britain': 'United Kingdom', 'Britain': 'United Kingdom',
-        'Czechia': 'Czech Republic', 'České': 'Czech Republic', 'Česká': 'Czech Republic',
-        'República Checa': 'Czech Republic', 'République tchèque': 'Czech Republic',
-        'Republic of Moldova': 'Moldova',
-        'Turkiye': 'Turkey', 'Türkiye': 'Turkey', 'T\x81rkiye': 'Turkey', # Handle encoding issue if present
-        'Korea, Rep.': 'South Korea', 'Korea': 'South Korea', 'Republic of Korea': 'South Korea',
-        'Russian Federation': 'Russia',
-        'Slovak Republic': 'Slovakia',
-        'Bosnia and Herzegovina': 'Bosnia-Herzegovina',
-        'United Arab Emirates': 'UAE', 'UAE (United Arab Emirates)': 'UAE', # Using UAE as standard here, map COUNTRY_DATA if needed
-        'Hong Kong SAR, China': 'Hong Kong',
-        'Taiwan, China': 'Taiwan',
-        'Macedonia, FYR': 'North Macedonia', 'Macedonia': 'North Macedonia',
-        'The Netherlands': 'Netherlands',
-        'Egypt, Arab Rep.': 'Egypt'
-        # Add more variations as identified from data
-    }
-    # Case-insensitive direct match first
-    normalized = country_variations.get(country, country) # Get from map or return original
-    for k, v in country_variations.items():
-        if k.lower() == country.lower():
-            normalized = v
-            break
-    return normalized.strip()
+def get_iso3(country_name):
+    try:
+        return countries.lookup(country_name).alpha_3
+    except LookupError:
+        return None
+
+cost_living_df = DATA['cost_living']  # extract it first
+COUNTRY_NAME_TO_ISO3 = {name: get_iso3(name) for name in cost_living_df['Country'].unique()}
 
 
 def get_available_years(country: str, salary_df: Optional[pd.DataFrame]) -> List[int]:
@@ -591,6 +799,282 @@ def get_cost_of_living(country: str, year: int,
         traceback.print_exc()
         return None
 
+def get_cpi(country, year, cpi_df):
+    try:
+        year_str = str(year)
+        if year_str not in cpi_df.columns:  # Check if the year exists as a column
+            if year == 2025:
+                year_str = "2024"
+                print(f"Using 2024 CPI data for {country} (2025 data not available)")
+            else:
+                raise KeyError(f"Year {year} not found in CPI data")  # Raise KeyError if not 2025
+        cpi = cpi_df.loc[country, year_str]
+        return float(cpi) if pd.notna(cpi) else None
+    except KeyError as e:
+        print(f"CPI data not found for {country} in {year}: {e}")
+        return None
+    except (TypeError, ValueError) as e:  # Catch type conversion errors
+        print(f"Error converting CPI value for {country} in {year}: {e}")
+        return None
+    
+def calculate_correlation(series1, series2, lag=0):
+    """
+    Calculate Pearson correlation coefficient between two aligned numeric series.
+    Optionally apply a lag (e.g. lag=1 means series1[y] vs series2[y+1])
+    """
+    if series1 is None or series2 is None:
+        return None
+    try:
+        s1 = pd.to_numeric(series1, errors='coerce')
+        s2 = pd.to_numeric(series2, errors='coerce')
+
+        # Ensure integer index (years)
+        s1.index = s1.index.astype(int)
+        s2.index = s2.index.astype(int)
+
+        # Apply lag: shift index of s2 if lag != 0
+        if lag != 0:
+            s2 = s2.copy()
+            s2.index = s2.index - lag
+
+        # Align years and drop missing
+        valid_years = s1.index.intersection(s2.index)
+        aligned_df = pd.DataFrame({
+            's1': s1.loc[valid_years],
+            's2': s2.loc[valid_years]
+        }).dropna()
+
+        print(f"Correlation data points (lag={lag}): {len(aligned_df)}")
+        if len(aligned_df) >= 3:
+            print(f"Series 1 values: {aligned_df['s1'].tolist()}")
+            print(f"Series 2 values: {aligned_df['s2'].tolist()}")
+            correlation = float(aligned_df['s1'].corr(aligned_df['s2']))
+            print(f"Calculated correlation (lag={lag}): {correlation}")
+            return correlation
+        return None
+
+    except Exception as e:
+        print(f"Error in correlation calculation: {e}")
+        return None
+
+def get_historical_values(country, start_year, end_year, data_df, value_column, date_column='Year'):
+    """Get historical values for a country between start_year and end_year."""
+    if data_df is None:
+        return None
+    try:
+        country_data = data_df[data_df['Country'] == country]
+        if date_column in country_data.columns:
+            filtered_data = country_data[
+                (country_data[date_column] >= start_year) & 
+                (country_data[date_column] <= end_year)
+            ]
+            return filtered_data[value_column].values
+        return None
+    except Exception as e:
+        print(f"Error getting historical values for {country}: {e}")
+        return None
+
+def calculate_vat_inflation_correlation(country, year, vat_data, cpi_df, window=None):
+    """Calculate correlation between VAT rates and inflation for 2015-2025."""
+    try:
+        if vat_data is None or cpi_df is None or 'get_rate' not in vat_data:
+            return None
+            
+        data_points = []
+        
+        for y in range(2015, 2026):
+            rate = vat_data['get_rate'](country, y)
+            cpi = get_cpi(country, y, cpi_df)
+            
+            if rate is not None and cpi is not None:
+                data_points.append({
+                    'year': y,
+                    'vat': rate,
+                    'cpi': cpi
+                })
+                print(f"{country} - Year {y}: VAT = {rate}, CPI = {cpi}")
+
+        if len(data_points) >= 2:
+            df = pd.DataFrame(data_points)
+            print(f"\nVAT trend data for {country}:")
+            print(df)
+            correlation = calculate_correlation(df['vat'], df['cpi'])
+            print(f"VAT-CPI correlation for {country} (2015-2025): {correlation}")
+            return correlation
+        else:
+            print(f"Not enough VAT data points for {country} over 2015-2025")
+            return None
+
+    except Exception as e:
+        print(f"Error calculating VAT-Inflation correlation for {country}: {e}")
+        traceback.print_exc()
+        return None
+
+def calculate_salary_inflation_correlation(country, year, salary_df, cpi_df, window=None):
+    """Calculate correlation between salary and inflation for 2015-2025."""
+    try:
+        # Use fixed range 2015-2025 instead of window
+        data_points = []
+        
+        for y in range(2015, 2026):  # 2015 to 2025 inclusive
+            salary = get_average_salary(country, y, salary_df)
+            cpi = get_cpi(country, y, cpi_df)
+            
+            if salary is not None and cpi is not None:
+                data_points.append({
+                    'year': y,
+                    'salary': salary,
+                    'cpi': cpi
+                })
+                print(f"{country} - Year {y}: Salary = {salary}, CPI = {cpi}")
+
+        if len(data_points) >= 2:
+            df = pd.DataFrame(data_points)
+            print(f"\nSalary trend data for {country}:")
+            print(df)
+            correlation = calculate_correlation(df['salary'], df['cpi'])
+            print(f"Salary-CPI correlation for {country} (2015-2025): {correlation}")
+            return correlation
+        else:
+            print(f"Not enough salary data points for {country} over 2015-2025")
+            return None
+            
+    except Exception as e:
+        print(f"Error calculating Salary-Inflation correlation for {country}: {e}")
+        traceback.print_exc()
+        return None
+
+def calculate_oil_inflation_correlation(country, year, crude_oil_df, cpi_df, window=5):
+    """Calculate correlation between oil prices and inflation."""
+    try:
+        if crude_oil_df is None or cpi_df is None:
+            return None
+            
+        start_year = year - window
+        end_year = year
+        
+        # Get oil prices
+        oil_prices = crude_oil_df[
+            (crude_oil_df['Date'].dt.year >= start_year) &
+            (crude_oil_df['Date'].dt.year <= end_year)
+        ]['Brent_Price'].values
+        
+        # Get CPI values
+        cpi_values = []
+        for y in range(start_year, end_year + 1):
+            cpi = get_cpi(country, y, cpi_df)
+            if cpi is not None:
+                cpi_values.append(cpi)
+        
+        return calculate_correlation(pd.Series(oil_prices), pd.Series(cpi_values))
+    except Exception as e:
+        print(f"Error calculating Oil-Inflation correlation for {country}: {e}")
+        return None
+
+def calculate_col_inflation_correlation(country, year, cost_living_df, cpi_df, window=None):
+    """Calculate correlation between cost of living and inflation for 2015-2025."""
+    try:
+        data_points = []
+        
+        for y in range(2015, 2026):
+            costs_breakdown = get_cost_of_living(country, y, cost_living_df, None, cpi_df)
+            if costs_breakdown:
+                total_cost = sum(costs_breakdown.values())
+                cpi = get_cpi(country, y, cpi_df)
+                if cpi is not None:
+                    data_points.append({
+                        'year': y,
+                        'cost': total_cost,
+                        'cpi': cpi
+                    })
+                    print(f"{country} - Year {y}: Cost = {total_cost}, CPI = {cpi}")
+
+        if len(data_points) >= 2:
+            df = pd.DataFrame(data_points)
+            print(f"\nCost of Living trend data for {country}:")
+            print(df)
+            correlation = calculate_correlation(df['cost'], df['cpi'])
+            print(f"Cost-CPI correlation for {country} (2015-2025): {correlation}")
+            return correlation
+        else:
+            print(f"Not enough cost data points for {country} over 2015-2025")
+            return None
+
+    except Exception as e:
+        print(f"Error calculating Cost-Inflation correlation for {country}: {e}")
+        traceback.print_exc()
+        return None
+    
+def get_exchange_rate(country, year, exchange_rates, country_mapping):
+    """Retrieve exchange rate with robust country mapping and fallback."""
+    try:
+        year_str = str(year)
+        mapped_country = country_mapping.get(country)  # Map country name
+
+        if not mapped_country or mapped_country == "N/A":  # Handle missing or special cases
+            print(f"Skipping exchange rate lookup for {country} (not in mapping)")
+            return None
+
+        if year_str not in exchange_rates.columns:
+            if year > 2015:
+                rate = get_exchange_rate(country, year - 1, exchange_rates, country_mapping)  # Recursive call with mapping
+                if rate is not None:
+                    print(f"Using exchange rate from {year - 1} for {country} in {year}")
+                    return rate
+            print(f"Exchange rate not found for {country} in {year} (or previous year). Using default.")
+            return 1.0  # Or handle differently
+        
+        rate_str = exchange_rates.loc[mapped_country, year_str]  # Use mapped country for lookup
+        rate = float(rate_str.replace(',', '.')) if rate_str else None
+        print(f"Exchange rate for {country} ({year}): {rate}")
+        return rate
+
+    except (KeyError, ValueError, TypeError, AttributeError) as e:
+        print(f"Error getting exchange rate for {country} ({year}): {e}")
+        return None  # Or handle differently
+
+
+def calculate_currency_inflation_correlation(country, year, currency_df, cpi_df, window=None):
+    """Calculate correlation between exchange rates and inflation for 2015-2025."""
+    try:
+        data_points = []
+        normalized_country = normalize_country_name(country)
+        
+        for y in range(2015, 2026):
+            year_str = str(y)
+            if year_str in currency_df.columns:
+                try:
+                    rate = currency_df.loc[normalized_country, year_str]
+                    if pd.notna(rate):
+                        rate = float(str(rate).replace(',', '.'))
+                        cpi = get_cpi(country, y, cpi_df)
+                        if cpi is not None:
+                            data_points.append({
+                                'year': y,
+                                'rate': rate,
+                                'cpi': cpi
+                            })
+                            print(f"{country} - Year {y}: Exchange Rate = {rate}, CPI = {cpi}")
+                except (KeyError, ValueError) as e:
+                    print(f"Error getting exchange rate for {country} in {y}: {e}")
+                    continue
+
+        if len(data_points) >= 2:
+            df = pd.DataFrame(data_points)
+            print(f"\nCurrency trend data for {country}:")
+            print(df)
+            correlation = calculate_correlation(df['rate'], df['cpi'])
+            print(f"Currency-CPI correlation for {country} (2015-2025): {correlation}")
+            return correlation
+        else:
+            print(f"Not enough currency data points for {country} over 2015-2025")
+            return None
+
+    except Exception as e:
+        print(f"Error calculating Currency-Inflation correlation for {country}: {e}")
+        traceback.print_exc()
+        return None
+
 # --- UI Definition ---
 app_ui = ui.page_fluid(
     ui.tags.head(
@@ -599,7 +1083,6 @@ app_ui = ui.page_fluid(
             .error-message { color: red; font-weight: bold; }
             .stats { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 15px; white-space: pre-wrap; }
             .download-button { margin-top: 15px; }
-            .debug-info { white-space: pre-wrap; background: #eee; padding: 10px; font-size: 0.8em; max-height: 300px; overflow-y: auto;}
         """)
     ),
     ui.h2("🌍 Global Cost of Living Comparison", class_="title"),
@@ -633,8 +1116,8 @@ app_ui = ui.page_fluid(
                 ui.nav_panel("Country Comparison", ui.output_ui("country_comparison_ui")),
                 ui.nav_panel("Cost Map", ui.output_ui("cost_map_ui")),
                 ui.nav_panel("Inflation Trends", ui.output_ui("inflation_plot_ui")),
-                ui.nav_panel("Data Table", ui.output_data_frame("cost_table_df")),
-                ui.nav_panel("Debug Info", ui.div(ui.output_text_verbatim("debug_info_text"), class_="debug-info"))
+                ui.nav_panel("Radar Analysis", ui.output_ui("radar_chart_ui")),
+                ui.nav_panel("Data Table", ui.output_data_frame("cost_table_df"))
             )
         )
     )
@@ -744,50 +1227,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 hist_data[year_val] = None # Or some indicator of missing data
         return hist_data
 
-
-    @output
-    @render.text
-    def debug_info_text():
-        try:
-            sel_countries = selected_countries_list()
-            year_input = int(input.year())
-            agg_data_for_year = current_input_year_data() # Uses input.year()
-
-            debug_lines = [
-                "=== Debug Information ===",
-                f"Timestamp: {datetime.now()}",
-                f"Selected Year: {year_input}",
-                f"Selected Countries: {sel_countries}",
-                f"Available countries with salary data: {len(AVAILABLE_COUNTRIES_WITH_SALARY)}",
-                "\nData Shapes (Initial Load):",
-                f"Salary data: {DATA['salary'].shape if DATA.get('salary') is not None else 'Not loaded'}",
-                f"Cost living data: {DATA['cost_living'].shape if DATA.get('cost_living') is not None else 'Not loaded'}",
-                f"Categories data: {DATA['categories'].shape if DATA.get('categories') is not None else 'Not loaded'}",
-                f"CPI data: {DATA['cpi'].shape if DATA.get('cpi') is not None else 'Not loaded'}",
-            ]
-            
-            if sel_countries and agg_data_for_year:
-                primary_c_debug = sel_countries[0]
-                debug_lines.append(f"\n--- Data for Primary Country: {primary_c_debug} (Year: {year_input}) ---")
-                country_specific_data = agg_data_for_year.get(primary_c_debug)
-                if country_specific_data:
-                    debug_lines.append(f"Costs Breakdown: {country_specific_data.get('costs')}")
-                    debug_lines.append(f"Salary: {country_specific_data.get('salary')}")
-                    debug_lines.append(f"Total Cost: {country_specific_data.get('total_cost')}")
-                    debug_lines.append(f"Housing Percentage: {country_specific_data.get('housing_percentage')}")
-                else:
-                    debug_lines.append("No aggregated data found for the primary country for the selected year.")
-            
-            # # Check get_cost_of_living directly for primary country and current year
-            # if sel_countries:
-            #     cost_direct = get_cost_of_living(sel_countries[0], year_input, cost_living_df_reactive(), categories_df_reactive(), cpi_df_reactive())
-            #     debug_lines.append(f"\nDirect call get_cost_of_living for {sel_countries[0]}, {year_input}: {cost_direct}")
-
-
-            return "\n".join(debug_lines)
-        except Exception as e_debug:
-            return f"Error in debug info: {str(e_debug)}\n{traceback.format_exc()}"
-    
+          
     @output
     @render.text
     def error_message() -> str:
@@ -906,7 +1346,8 @@ def server(input: Inputs, output: Outputs, session: Session):
             showlegend=True,
             height=600
     )
-
+        
+        
         return ui.HTML(fig.to_html(include_plotlyjs="cdn", full_html=False))
 
 
@@ -972,11 +1413,9 @@ def server(input: Inputs, output: Outputs, session: Session):
     @render.ui
     @reactive.event(input.generate_plots)
     def cost_map_ui():
-        sel_countries_for_highlight = selected_countries_list() # For highlighting
-        # Map should show all available countries with cost data for the selected year
-        
+        sel_countries_for_highlight = selected_countries_list()
         year_sel_map = int(input.year())
-        
+
         cost_liv_df = cost_living_df_reactive()
         cat_df = categories_df_reactive()
         cpi_data_df = cpi_df_reactive()
@@ -984,82 +1423,86 @@ def server(input: Inputs, output: Outputs, session: Session):
         if cost_liv_df is None or cat_df is None:
             return ui.p("Core data for map not loaded (cost_living or categories).")
 
-        all_countries_for_map = cost_liv_df['Country'].unique() # Countries from Cost_of_living.csv
-        
-        map_plot_data = []
-        
-        for country_from_cost_liv_file in all_countries_for_map:
-            # `country_from_cost_liv_file` is the name as it appears in Cost_of_living.csv
-            # `get_cost_of_living` expects a name that can be mapped to all datasets (often from salary list)
-            # For the map, we're centering on `cost_living_df` countries.
-            # We need to ensure `country_from_cost_liv_file` is used appropriately or mapped if needed by `get_cost_of_living`.
-            # The first argument to `get_cost_of_living` is critical for its internal mapping.
-            # Let's use `country_from_cost_liv_file` as the primary identifier for this loop.
+        all_countries_for_map = cost_liv_df['Country'].unique()
 
-            costs_info = get_cost_of_living(country_from_cost_liv_file, year_sel_map, cost_liv_df, cat_df, cpi_data_df)
+        choropleth_data = []
+
+        for country in all_countries_for_map:
+            costs_info = get_cost_of_living(country, year_sel_map, cost_liv_df, cat_df, cpi_data_df)
 
             if costs_info:
                 total_c = sum(costs_info.values())
-                
-                # Find coordinates - try direct, then normalized, then broader search
-                country_info_coords = COUNTRY_DATA.get(country_from_cost_liv_file)
-                if not country_info_coords:
-                    norm_name_for_coords = normalize_country_name(country_from_cost_liv_file)
-                    country_info_coords = COUNTRY_DATA.get(norm_name_for_coords)
-                    if not country_info_coords: # Last attempt: iterate COUNTRY_DATA
-                        for k_cd, v_cd in COUNTRY_DATA.items():
-                            if country_from_cost_liv_file.lower() in k_cd.lower() or \
-                               (norm_name_for_coords and norm_name_for_coords.lower() in k_cd.lower()):
-                                country_info_coords = v_cd
-                                break
-                
-                if country_info_coords:
-                    map_plot_data.append({
-                        'country_name_display': country_from_cost_liv_file, # Display name from cost_living file
-                        'lat': country_info_coords['lat'],
-                        'lon': country_info_coords['lon'],
+                iso3 = COUNTRY_NAME_TO_ISO3.get(country) or COUNTRY_NAME_TO_ISO3.get(normalize_country_name(country))
+                if iso3:
+                    choropleth_data.append({
+                        'iso3': iso3,
+                        'country_name_display': country,
                         'total_cost': total_c,
-                        'is_selected': country_from_cost_liv_file in sel_countries_for_highlight or \
-                                       normalize_country_name(country_from_cost_liv_file) in sel_countries_for_highlight
-                    })
-                # else:
-                    # print(f"Map: No coordinates for {country_from_cost_liv_file}")
-            # else:
-                # print(f"Map: No cost info for {country_from_cost_liv_file} for year {year_sel_map}")
+                        'is_selected': country in sel_countries_for_highlight or \
+                                   normalize_country_name(country) in sel_countries_for_highlight
+                })
 
-
-        if not map_plot_data:
+        if not choropleth_data:
             return ui.p("No data available for the map visualization for the selected year.")
 
-        df_map = pd.DataFrame(map_plot_data)
-        if df_map.empty:
-             return ui.p("No data to plot on map (empty DataFrame).")
+        df_map = pd.DataFrame(choropleth_data)
 
-        fig = go.Figure()
-        fig.add_trace(go.Scattergeo(
-            lon=df_map['lon'], lat=df_map['lat'],
-            text=[f"{d['country_name_display']}<br>Cost: ${d['total_cost']:,.2f}" for i, d in df_map.iterrows()],
-            mode='markers',
-            marker=dict(
-                size=[12 if d['is_selected'] else 7 for i, d in df_map.iterrows()], # Adjusted size
-                color=df_map['total_cost'],
-                colorscale='Viridis', showscale=True, colorbar_title="Cost of Living ($)",
-                line=dict(
-                    width=[2 if d['is_selected'] else 0.5 for i,d in df_map.iterrows()],
-                    color=['red' if d['is_selected'] else 'grey' for i,d in df_map.iterrows()]
-                )
-            ),
-            name='Countries'
-        ))
+        fig = go.Figure(data=go.Choropleth(
+            locations=df_map['iso3'],
+            z=df_map['total_cost'],
+            text=df_map['country_name_display'],
+            hovertemplate="<b>%{text}</b><br>Cost of Living: <b>$%{z:,.0f}</b><extra></extra>",
+    # Custom colorscale with more color steps in the lower range
+            colorscale=[
+                [0, 'rgb(0, 0, 128)'],         # Dark blue for lowest values (~500)
+                [0.1, 'rgb(0, 0, 255)'],       # Blue (~750)
+                [0.2, 'rgb(0, 128, 255)'],     # Light blue (~1000)
+                [0.3, 'rgb(0, 255, 255)'],     # Cyan (~1250)
+                [0.4, 'rgb(0, 255, 128)'],     # Blue-green (~1500)
+                [0.5, 'rgb(0, 255, 0)'],       # Green (~1750)
+                [0.6, 'rgb(128, 255, 0)'],     # Yellow-green (~2000)
+                [0.7, 'rgb(255, 255, 0)'],     # Yellow (~2250)
+                [0.8, 'rgb(255, 128, 0)'],     # Orange (~2500)
+                [0.9, 'rgb(255, 0, 0)'],       # Red (~2750)
+                [1.0, 'rgb(128, 0, 0)']        # Dark red for highest values (~3000)
+    ],
+            autocolorscale=False,
+            reversescale=False,
+            marker_line_color='rgb(50, 50, 50)',
+            marker_line_width=0.5,
+            colorbar_title="Cost of Living ($)",
+            zmin=df_map['total_cost'].min(),
+            zmax=min(df_map['total_cost'].max(), 3000),
+    # Create more tick marks on the color scale
+            colorbar=dict(
+                tickvals=[500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000],
+                ticktext=['$500', '$750', '$1000', '$1250', '$1500', '$1750', '$2000', '$2250', '$2500', '$2750', '$3000']
+    )
+))
+
+# Make no-data areas very distinct
+        fig.update_geos(
+            showframe=False,
+            showcoastlines=True,
+            projection_type='natural earth',
+            landcolor='rgb(220, 220, 220)',    # Light grey for no data
+            showcountries=True,
+            countrycolor='rgb(80, 80, 80)',    # Darker grey for borders
+            countrywidth=0.5
+)
+
+# Improve overall layout
         fig.update_layout(
-            title=f'Global Cost of Living Map ({year_sel_map})',
+            title_text=f'Global Cost of Living Map ({year_sel_map})',
             geo=dict(
-                showland=True, showcountries=True, showocean=True,
-                countrywidth=0.5, landcolor='rgb(227, 227, 227)', oceancolor='rgb(204, 229, 255)',
-                projection_type='natural earth' # Changed projection
-            ),
-            height=600, margin={"r":0,"t":50,"l":0,"b":0}
-        )
+                showframe=False,
+                showcoastlines=True,
+                projection_type='natural earth'
+    ),
+            height=600, 
+            margin={"r":0,"t":50,"l":0,"b":0},
+            font=dict(size=14)
+)
         return ui.HTML(fig.to_html(include_plotlyjs="cdn", full_html=False))
 
 
@@ -1160,8 +1603,143 @@ def server(input: Inputs, output: Outputs, session: Session):
             height=500,
             margin=dict(b=100, t=80)
     )
-
+        
         return ui.HTML(fig.to_html(include_plotlyjs="cdn", full_html=False))
+    
+    @output
+    @render.ui
+    @reactive.event(input.generate_plots)
+    def radar_chart_ui():
+        """Create radar chart with correlation values."""
+        sel_countries = selected_countries_list()
+        if not sel_countries:
+            return ui.p("Please select countries to compare.")
+
+        year_sel = int(input.year())
+        chart_data = []
+
+    # Define features and their display names
+        features_config = {
+            'vat_correlation': {
+                'name': 'VAT-Inflation',
+                'getter': lambda x: calculate_vat_inflation_correlation(x, year_sel, DATA.get("vat_rates"), DATA.get("cpi")),
+                'formatter': lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+        },
+            'salary_correlation': {
+                'name': 'Salary-Inflation',
+                'getter': lambda x: calculate_salary_inflation_correlation(x, year_sel, DATA.get("salary"), DATA.get("cpi")),
+                'formatter': lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+        },
+            'oil_correlation': {
+                'name': 'Oil-Inflation',
+                'getter': lambda x: calculate_oil_inflation_correlation(x, year_sel, DATA.get("crude_oil"), DATA.get("cpi")),
+                'formatter': lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+        },
+            'col_correlation': {
+                'name': 'Cost of Living-Inflation',
+                'getter': lambda x: calculate_col_inflation_correlation(x, year_sel, DATA.get("cost_living"), DATA.get("cpi")),
+                'formatter': lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+        },
+            'currency_correlation': {
+                'name': 'Currency-Inflation',
+                'getter': lambda x: calculate_currency_inflation_correlation(x, year_sel, DATA.get("currency"), DATA.get("cpi")),
+                'formatter': lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+        }
+    }
+
+        for country in sel_countries:
+            try:
+                row_data = {'Country': country}
+                for feature_id, config in features_config.items():
+                    try:
+                        value = config['getter'](country)
+                        if value is not None and not pd.isna(value):
+                            row_data[feature_id] = float(abs(value))  
+                        else:
+                            row_data[feature_id] = np.nan
+                    except Exception as e:
+                        print(f"Error calculating {feature_id} for {country}: {e}")
+                        row_data[feature_id] = np.nan
+
+                if any(pd.notna(row_data[feat]) for feat in features_config.keys()):
+                    chart_data.append(row_data)
+                    print(f"Data added for {country}: {row_data}")
+                else:
+                    print(f"No valid data for {country}, skipping.")
+
+            except Exception as e:
+                print(f"Error processing data for {country}: {e}")
+
+        if not chart_data:
+            return ui.p("No valid correlation data for selected countries.")
+
+        try:
+            df = pd.DataFrame(chart_data)
+            feature_ids = list(features_config.keys())
+
+            fig = go.Figure()
+            colors = px.colors.qualitative.Set3
+
+            for idx, (_, row) in enumerate(df.iterrows()):
+                r_values = row[feature_ids].tolist()
+                theta_labels = [features_config[f]['name'] for f in feature_ids]
+                hover_text = [
+                    f"{features_config[f]['name']}: {features_config[f]['formatter'](row[f])}" for f in feature_ids
+            ]
+
+                fig.add_trace(go.Scatterpolar(
+                    r=r_values,
+                    theta=theta_labels,
+                    fill='toself',
+                    name=row['Country'],
+                    line_color=colors[idx % len(colors)],
+                    opacity=0.7,
+                    text=hover_text,
+                    hovertemplate="<b>%{theta}</b><br>Correlation: %{r:.2f}<extra></extra>",
+            ))
+
+            fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(
+                        visible=True,
+                        range=[-1, 1],
+                        tickformat='.2f',
+                        gridcolor='rgba(0,0,0,0.1)',
+                        showline=False
+                )
+            ),
+                title=dict(
+                    text=f"Economic Indicators Correlation with Inflation ({year_sel})",
+                    x=0.5,
+                    y=0.95,
+                    font=dict(size=20)
+            ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=-0.2,
+                    xanchor="center",
+                    x=0.5
+            ),
+                margin=dict(t=100, b=150),
+                height=700
+        )
+            
+            return ui.HTML(fig.to_html(include_plotlyjs="cdn", full_html=False))
+
+        except Exception as e:
+            print(f"Error creating radar chart: {e}")
+            return ui.p(f"Error creating radar chart: {str(e)}")
+    
+    def get_formatted_values_for_hover(country, year, features_config):
+        """Formats the original values for the hover tooltip."""
+        formatted_values = ""
+        for feature_id, config in features_config.items():
+            value = config['getter'](country)
+            formatted_values += f"{config['name']}: {config['formatter'](value)}&lt;br&gt;"
+        return formatted_values
+    
 
     @output
     @render.data_frame
@@ -1240,3 +1818,5 @@ def server(input: Inputs, output: Outputs, session: Session):
         yield output_sio.getvalue()
 
 app = App(app_ui, server)
+
+#app._app.mount("/", StaticFiles(directory="www"), name="www")
