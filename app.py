@@ -98,13 +98,13 @@ COUNTRY_DATA = {
 COUNTRY_NAME_MAPPING = {
     # Mapping between salary data (key) and CPI data (values - list of possible names in CPI data)
     'Monaco': ['Monaco'],
-    'Bermuda*': ['Bermuda'], # Asterisk might need handling if it's part of the name in salary data
+    'Bermuda*': ['Bermuda'], 
     'Liechtenstein': ['Liechtenstein'],
     'Norway': ['Norway'],
     'Switzerland': ['Switzerland'],
     'Luxembourg': ['Luxembourg'],
     'Singapore': ['Singapore'],
-    'USA': ['United States', 'United States of America'], # 'United States' is common in World Bank CPI data
+    'USA': ['United States', 'United States of America'], 
     'Ireland': ['Ireland'],
     'Australia': ['Australia'],
     'Denmark': ['Denmark'],
@@ -122,7 +122,7 @@ COUNTRY_NAME_MAPPING = {
     'Japan': ['Japan'],
     'Italy': ['Italy'],
     'New Zealand': ['New Zealand'],
-    'South Korea': ['Korea, Rep.', 'South Korea', 'Korea'], # 'Korea, Rep.' is common in World Bank
+    'South Korea': ['Korea, Rep.', 'South Korea', 'Korea'],
     'Spain': ['Spain'],
     'Cyprus': ['Cyprus'],
     'Malta': ['Malta'],
@@ -150,7 +150,7 @@ COUNTRY_NAME_MAPPING = {
     'Indonesia': ['Indonesia'],
     'Philippines': ['Philippines'],
     'India': ['India'],
-    'Vietnam': ['Vietnam'], # Might be 'Viet Nam' in some datasets
+    'Vietnam': ['Vietnam'], 
     'Egypt': ['Egypt, Arab Rep.', 'Egypt'],
     'South Africa': ['South Africa']
 }
@@ -531,15 +531,6 @@ def load_data() -> Optional[Dict[str, pd.DataFrame]]:
 DATA = load_data() # Call only once
 if DATA is None:
     raise Exception("Failed to load required data files. Check file paths and formats.")
-
-# Print info after loading
-# for key, df_item in DATA.items():
-#     if isinstance(df_item, pd.DataFrame):
-#         print(f"\n{key} DataFrame Head:\n{df_item.head()}")
-#         print(f"{key} DataFrame Info:")
-#         df_item.info()
-#     else:
-#         print(f"\n{key}: Data is not a DataFrame (type: {type(df_item)})")
     
 def get_iso3(country_name):
     try:
@@ -637,9 +628,6 @@ def get_housing_expenditure(country: str, categories_df: Optional[pd.DataFrame])
         # print("Categories data not available for get_housing_expenditure.")
         return None
     try:
-        # print(f"\nLooking for housing data for: Country: {country}")
-        # print(f"Available countries in categories_df: {categories_df['Country'].unique()}")
-
         country_data = categories_df[categories_df['Country'] == country]
         
         if country_data.empty: # Try normalized name if exact match fails
@@ -783,10 +771,6 @@ def get_cost_of_living(country: str, year: int,
                             costs_breakdown[category] = (costs_breakdown[category] / total_percentage)
                     return costs_breakdown
 
-        # If we get here, either:
-        # 1. No categories_df provided
-        # 2. Country not found in categories_df
-        # 3. Invalid percentages in categories_df
         # Use default percentages
         print(f"Using default percentages for {country}")
         for category, percentage in default_percentages.items():
@@ -1818,5 +1802,3 @@ def server(input: Inputs, output: Outputs, session: Session):
         yield output_sio.getvalue()
 
 app = App(app_ui, server)
-
-#app._app.mount("/", StaticFiles(directory="www"), name="www")
